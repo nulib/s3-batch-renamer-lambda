@@ -88,14 +88,30 @@ exports.handler = async function (event, _context, callback) {
 
   console.log("event:", JSON.stringify(event));
 
+  const sha256 = path.basename(s3Key);
+  const fileSetId = await fetchId(sha256);
+  const newKey = fileSetId
+    .slice(0, 8)
+    .match(/.{2}/g)
+    .join("/")
+    .concat("/", fileSetId);
+
   try {
-    const sha256 = path.basename(s3Key);
-    let fileSetId = await fetchId(sha256);
+    const objectInfo = await S3.headObject({
+      Bucket: sourceBucket,
+      Key: s3Key,
+    }).promise();
+
+    console.log("objectInfo", objectInfo);
+
+    const tags = `sha1=${objectInfo.Metadata.sha1}&sha256=${objectInfo.Metadata.sha256}`;
 
     const params = {
       Bucket: sourceBucket,
       CopySource: `/${sourceBucket}/${s3Key}`,
-      Key: fileSetId
+      Key: newKey,
+      Tagging: tags,
+      TaggingDirective: "REPLACE",
     };
 
     console.log("params:", JSON.stringify(params));
@@ -118,7 +134,7 @@ exports.handler = async function (event, _context, callback) {
       {
         taskId: taskId,
         resultCode: resultCode,
-        resultString: s3Key,
+        resultString: newKey,
       },
     ],
   };
