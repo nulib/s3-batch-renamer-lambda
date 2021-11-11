@@ -104,7 +104,7 @@ exports.handler = async function (event, _context, callback) {
 
     console.log("objectInfo", objectInfo);
 
-    const tags = `sha1=${objectInfo.Metadata.sha1}&sha256=${objectInfo.Metadata.sha256}`;
+    const tags = `computed-sha1=${objectInfo.Metadata.sha1}&computed-sha256=${objectInfo.Metadata.sha256}`;
 
     const params = {
       Bucket: sourceBucket,
@@ -119,7 +119,7 @@ exports.handler = async function (event, _context, callback) {
     if (fileSetId) {
       await S3.copyObject(params).promise();
     } else {
-      throw `Error retrieving fileSetID for ${sha256}`;
+      throw `Error retrieving fileSetId for ${sha256}`;
     }
   } catch (e) {
     console.log(e);
