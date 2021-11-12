@@ -84,19 +84,25 @@ exports.handler = async function (event, _context, callback) {
   const S3 = new AWS.S3();
   const pieces = s3BucketArn.split(":");
   const sourceBucket = pieces[pieces.length - 1];
-  var resultCode = "Succeeded";
+  let resultCode = "Succeeded";
+  let resultString = "";
 
   console.log("event:", JSON.stringify(event));
 
-  const sha256 = path.basename(s3Key);
-  const fileSetId = await fetchId(sha256);
-  const newKey = fileSetId
-    .slice(0, 8)
-    .match(/.{2}/g)
-    .join("/")
-    .concat("/", fileSetId);
-
   try {
+    const sha256 = path.basename(s3Key);
+    const fileSetId = await fetchId(sha256);
+
+    if (typeof fileSetId === "undefined") {
+      throw `Error: no file set found in Elasticsearch for key ${sha256}`;
+    }
+
+    const newKey = fileSetId
+      .slice(0, 8)
+      .match(/.{2}/g)
+      .join("/")
+      .concat("/", fileSetId);
+
     const objectInfo = await S3.headObject({
       Bucket: sourceBucket,
       Key: s3Key,
@@ -117,13 +123,37 @@ exports.handler = async function (event, _context, callback) {
     console.log("params:", JSON.stringify(params));
 
     if (fileSetId) {
-      await S3.copyObject(params).promise();
+      S3.copyObject(params, function (err, data) {
+        if (err) {
+          console.log(err, err.stack);
+          throw "Error: copy object failed";
+        } else {
+          S3.deleteObject(
+            { Bucket: sourceBucket, Key: s3Key },
+            function (err, data) {
+              if (err) {
+                console.log(err, err.stack);
+                throw "Error: copy object failed";
+              }
+            }
+          );
+        }
+      });
+
+      if (
+        typeof objectInfo.Metadata.sha1 === "undefined" ||
+        typeof objectInfo.Metadata.sha256 === "undefined"
+      ) {
+        throw `Error: no checksums found in metadata for fileSetId ${fileSetId}`;
+      }
+      resultString = newKey;
     } else {
       throw `Error retrieving fileSetId for ${sha256}`;
     }
   } catch (e) {
     console.log(e);
     resultCode = "PermanentFailure";
+    resultString = e;
   }
 
   let returnResult = {
@@ -134,7 +164,7 @@ exports.handler = async function (event, _context, callback) {
       {
         taskId: taskId,
         resultCode: resultCode,
-        resultString: newKey,
+        resultString: resultString,
       },
     ],
   };
