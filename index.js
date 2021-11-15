@@ -3,6 +3,7 @@ const elasticsearchEndpoint = process.env.elasticsearchEndpoint;
 const path = require("path");
 const region = process.env.region;
 const index = process.env.indexName;
+const deleteOriginals = process.env.deleteOriginals;
 
 async function makeRequest(sha256) {
   return new Promise((resolve, _reject) => {
@@ -11,7 +12,7 @@ async function makeRequest(sha256) {
 
     const document = {
       _source: ["id"],
-      size: 1,
+      size: 1000,
       query: {
         bool: {
           must: [
@@ -64,18 +65,29 @@ async function awsFetch(request) {
   });
 }
 
-async function fetchId(sha256) {
+async function fetchIds(sha256) {
   let request = await makeRequest(sha256);
   let response = await awsFetch(request);
 
   let doc = JSON.parse(response);
 
-  console.log("response: ", response);
-
-  return doc?.hits?.hits[0]?._source?.id;
+  return doc.hits.hits.map((hit) => hit._source.id);
 }
 
-exports.handler = async function (event, _context, callback) {
+async function deleteOriginal(sourceBucket, s3Key) {
+  const S3 = new AWS.S3();
+
+  if (deleteOriginals) {
+    try {
+      await S3.deleteObject({ Bucket: sourceBucket, Key: s3Key }).promise();
+    } catch (err) {
+      console.log(err, err.stack);
+      throw err;
+    }
+  }
+}
+
+exports.handler = async function (event, _context) {
   const taskId = event["tasks"][0]["taskId"];
   const invocationId = event["invocationId"];
   const invocationSchemaVersion = event["invocationSchemaVersion"];
@@ -91,17 +103,11 @@ exports.handler = async function (event, _context, callback) {
 
   try {
     const sha256 = path.basename(s3Key);
-    const fileSetId = await fetchId(sha256);
+    const fileSetIds = await fetchIds(sha256);
 
-    if (typeof fileSetId === "undefined") {
+    if (fileSetIds.length == 0) {
       throw `Error: no file set found in Elasticsearch for key ${sha256}`;
     }
-
-    const newKey = fileSetId
-      .slice(0, 8)
-      .match(/.{2}/g)
-      .join("/")
-      .concat("/", fileSetId);
 
     const objectInfo = await S3.headObject({
       Bucket: sourceBucket,
@@ -110,50 +116,58 @@ exports.handler = async function (event, _context, callback) {
 
     console.log("objectInfo", objectInfo);
 
+    if (
+      typeof objectInfo.Metadata.sha1 === "undefined" ||
+      typeof objectInfo.Metadata.sha256 === "undefined"
+    ) {
+      throw `Error: no checksums found in metadata for object ${s3Key}`;
+    }
+
     const tags = `computed-sha1=${objectInfo.Metadata.sha1}&computed-sha256=${objectInfo.Metadata.sha256}`;
 
-    const params = {
-      Bucket: sourceBucket,
-      CopySource: `/${sourceBucket}/${s3Key}`,
-      Key: newKey,
-      Tagging: tags,
-      TaggingDirective: "REPLACE",
-    };
+    var successes = 0;
 
-    console.log("params:", JSON.stringify(params));
+    const newKeys = await Promise.all(
+      fileSetIds.map(async (fileSetId) => {
+        const newKey = fileSetId
+          .slice(0, 8)
+          .match(/.{2}/g)
+          .join("/")
+          .concat("/", fileSetId);
 
-    if (fileSetId) {
-      S3.copyObject(params, function (err, data) {
-        if (err) {
+        const params = {
+          Bucket: sourceBucket,
+          CopySource: `/${sourceBucket}/${s3Key}`,
+          Key: newKey,
+          Tagging: tags,
+          TaggingDirective: "REPLACE",
+        };
+
+        console.log("params:", JSON.stringify(params));
+
+        try {
+          await S3.copyObject(params).promise();
+          successes += 1;
+        } catch (err) {
           console.log(err, err.stack);
-          throw "Error: copy object failed";
-        } else {
-          S3.deleteObject(
-            { Bucket: sourceBucket, Key: s3Key },
-            function (err, data) {
-              if (err) {
-                console.log(err, err.stack);
-                throw "Error: copy object failed";
-              }
-            }
-          );
         }
-      });
 
-      if (
-        typeof objectInfo.Metadata.sha1 === "undefined" ||
-        typeof objectInfo.Metadata.sha256 === "undefined"
-      ) {
-        throw `Error: no checksums found in metadata for fileSetId ${fileSetId}`;
-      }
-      resultString = newKey;
+        return newKey;
+      })
+    );
+
+    resultString = newKeys.join(",");
+    console.log("successes", successes);
+    console.log("fileSetIds.length", fileSetIds.length);
+    if (successes === fileSetIds.length) {
+      await deleteOriginal(sourceBucket, s3Key);
     } else {
-      throw `Error retrieving fileSetId for ${sha256}`;
+      resultCode = "PermanentFailure";
     }
   } catch (e) {
     console.log(e);
     resultCode = "PermanentFailure";
-    resultString = e;
+    resultString = e.hasOwnProperty("code") ? e.code : e;
   }
 
   let returnResult = {
@@ -169,5 +183,5 @@ exports.handler = async function (event, _context, callback) {
     ],
   };
 
-  callback(null, returnResult);
+  return returnResult;
 };
